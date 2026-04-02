@@ -1,0 +1,101 @@
+import time
+import requests
+import cv2
+import threading
+import queue
+import tempfile
+import os
+
+M3U8_URL = "url"
+
+HEADERS = {
+    "User-Agent": "your user agent",
+    "Referer": "your refer url",
+}
+
+COOKIES = {}
+
+
+seg_queue = queue.Queue()
+stop_flag = False
+
+def downloader():
+    downloaded = set()
+    session = requests.Session()
+    session.headers.update(HEADERS)
+    session.cookies.update(COOKIES)
+
+    while not stop_flag:
+        try:
+            resp = session.get(M3U8_URL, timeout=10)
+            resp.raise_for_status()
+            playlist = resp.text
+
+            base = M3U8_URL.rsplit('/', 1)[0] + '/'
+
+            seg_urls = []
+            for line in playlist.splitlines():
+                line = line.strip()
+                if line and not line.startswith('#'):
+                    if line.startswith(('http://', 'https://')):
+                        seg_urls.append(line)
+                    else:
+                        seg_urls.append(base + line)
+
+            new_urls = [url for url in seg_urls if url not in downloaded]
+
+            for url in new_urls:
+                if stop_flag:
+                    break
+                print(f"download: {url}")
+                seg_resp = session.get(url, timeout=10)
+                seg_resp.raise_for_status()
+                seg_queue.put(seg_resp.content)
+                downloaded.add(url)
+
+            time.sleep(1)
+
+        except Exception as e:
+            print(f"download error: {e}")
+            time.sleep(2)
+
+def player():
+    global stop_flag
+    temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.ts')
+    temp_path = temp_file.name
+    temp_file.close()
+
+    while not stop_flag:
+        try:
+            data = seg_queue.get(timeout=1)
+        except queue.Empty:
+            continue
+
+        with open(temp_path, 'wb') as f:
+            f.write(data)
+
+        cap = cv2.VideoCapture(temp_path)
+        if not cap.isOpened():
+            print("can't open segment")
+            continue
+
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            cv2.imshow('Stream', frame)
+            if cv2.waitKey(25) & 0xFF == ord('q'):
+                stop_flag = True
+                break
+
+        cap.release()
+
+    os.unlink(temp_path)
+    cv2.destroyAllWindows()
+
+if __name__ == "__main__":
+    t = threading.Thread(target=downloader)
+    t.daemon = True
+    t.start()
+
+    player()
