@@ -5,21 +5,29 @@ import threading
 import queue
 import tempfile
 import os
+from ultralytics import YOLO
+import argparse
 
-M3U8_URL = "url"
+parser = argparse.ArgumentParser()
+parser.add_argument('-l', '--url', required=True, help='M3U8 URL')
+parser.add_argument('-s', '--seconds', type=int, default=None, help='Duration in seconds')
+args = parser.parse_args()
 
+M3U8_URL = args.url
+DURATION = args.seconds
+
+model = YOLO("yolov10n.pt")
 HEADERS = {
-    "User-Agent": "your user agent",
-    "Referer": "your refer url",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Referer": "https://vk.com/",
 }
-
 COOKIES = {}
 
-
 seg_queue = queue.Queue()
-stop_flag = False
+stop_flag = False  # обычный булев флаг
 
 def downloader():
+    global stop_flag
     downloaded = set()
     session = requests.Session()
     session.headers.update(HEADERS)
@@ -30,7 +38,6 @@ def downloader():
             resp = session.get(M3U8_URL, timeout=10)
             resp.raise_for_status()
             playlist = resp.text
-
             base = M3U8_URL.rsplit('/', 1)[0] + '/'
 
             seg_urls = []
@@ -43,11 +50,10 @@ def downloader():
                         seg_urls.append(base + line)
 
             new_urls = [url for url in seg_urls if url not in downloaded]
-
             for url in new_urls:
                 if stop_flag:
                     break
-                print(f"download: {url}")
+                print(f"Загрузка: {url}")
                 seg_resp = session.get(url, timeout=10)
                 seg_resp.raise_for_status()
                 seg_queue.put(seg_resp.content)
@@ -56,16 +62,20 @@ def downloader():
             time.sleep(1)
 
         except Exception as e:
-            print(f"download error: {e}")
+            print(f"Ошибка загрузки: {e}")
             time.sleep(2)
 
 def player():
     global stop_flag
+    start_time = time.time()
     temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.ts')
     temp_path = temp_file.name
     temp_file.close()
 
     while not stop_flag:
+        if DURATION is not None and (time.time() - start_time) >= DURATION:
+            stop_flag = True
+            break
         try:
             data = seg_queue.get(timeout=1)
         except queue.Empty:
@@ -76,13 +86,23 @@ def player():
 
         cap = cv2.VideoCapture(temp_path)
         if not cap.isOpened():
-            print("can't open segment")
+            print("Не удалось открыть сегмент")
             continue
 
         while True:
             ret, frame = cap.read()
             if not ret:
                 break
+
+            result = model(frame, conf=0.5, classes=[0,1,2,3,5,7])
+            for box in result[0].boxes:
+                x1, y1, x2, y2 = map(int, box.xyxy[0])
+                conf = box.conf[0]
+                cls = box.cls[0]
+                label = f"{model.names[int(cls)]} {conf:.2f}"
+                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                cv2.putText(frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+
             cv2.imshow('Stream', frame)
             if cv2.waitKey(25) & 0xFF == ord('q'):
                 stop_flag = True
@@ -93,9 +113,7 @@ def player():
     os.unlink(temp_path)
     cv2.destroyAllWindows()
 
-if __name__ == "__main__":
-    t = threading.Thread(target=downloader)
-    t.daemon = True
-    t.start()
-
-    player()
+t = threading.Thread(target=downloader)
+t.daemon = True
+t.start()
+player()
